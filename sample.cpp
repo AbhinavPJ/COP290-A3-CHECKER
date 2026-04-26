@@ -13,12 +13,30 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <cstdint>
 #include <random>
 
 #include "leveldb/db.h"
 #include "leveldb/iterator.h"
 
 namespace {
+
+// Inclusive [lo, hi] from one std::mt19937 draw. std::uniform_int_distribution
+// is not required to map engine output the same way on every stdlib, so
+// bit-identical goldens (ans.txt) would otherwise differ across machines.
+int UniformInRange(std::mt19937& gen, int lo, int hi) {
+  if (lo > hi) {
+    return lo;
+  }
+  const int64_t span64 =
+      static_cast<int64_t>(hi) - static_cast<int64_t>(lo) + 1;
+  if (span64 <= 0) {
+    return lo;
+  }
+  const uint32_t span = static_cast<uint32_t>(span64);
+  const uint32_t x = gen();
+  return lo + static_cast<int>(x % span);
+}
 
 const char* DbPath() {
   const char* p = std::getenv("COP290_DB");
@@ -160,7 +178,9 @@ const char* RaceDbPath() {
 // ForceFullCompaction on one DB, per clarifications (integrate with LevelDB
 // thread safety, no golden output — pass/fail only). Uses a separate path from
 // the single-threaded trace so `out.txt` is unchanged for `make run`.
-int RunConcurrentRaceTest() {
+// If `emit_race_line` is false, success is silent (main prints `ST: OK` /
+// `RACE: OK` for `sample --concurrent` / `make test`).
+int RunConcurrentRaceTest(bool emit_race_line) {
   {
     const std::string rmcmd =
         std::string("rm -rf '") + std::string(RaceDbPath()) + "'";
@@ -193,9 +213,6 @@ int RunConcurrentRaceTest() {
     threads.emplace_back([db, n_threads, ops_each, tid, &failed]() {
       std::mt19937 gen(67u + 1009u * static_cast<unsigned>(tid) +
                        17u * static_cast<unsigned>(n_threads));
-      std::uniform_int_distribution<int> op_dist(0, 99);
-      std::uniform_int_distribution<int> key_d(0, 9999);
-      std::uniform_int_distribution<int> val_d(1, 100000);
       const std::string pfx = "m" + std::to_string(tid);
       for (int i = 0; i < ops_each; ++i) {
         if (failed.load()) {
@@ -203,14 +220,17 @@ int RunConcurrentRaceTest() {
         }
         // Occasional cross-thread key to stress DeleteRange vs Put.
         int foreign = (tid + 1 + (i & 3)) % n_threads;
-        std::string k1 = pfx + "k" + std::to_string(key_d(gen));
-        std::string k2 = "m" + std::to_string(foreign) + "k" + std::to_string(key_d(gen) ^ 1);
+        std::string k1 =
+            pfx + "k" + std::to_string(UniformInRange(gen, 0, 9999));
+        std::string k2 = "m" + std::to_string(foreign) + "k" +
+                         std::to_string(UniformInRange(gen, 0, 9999) ^ 1);
         std::string a = k1, b = k2;
         if (a > b) {
           std::swap(a, b);
         }
-        std::string value_buf = pfx + "v" + std::to_string(val_d(gen));
-        int op = op_dist(gen);
+        std::string value_buf =
+            pfx + "v" + std::to_string(UniformInRange(gen, 1, 100000));
+        int op = UniformInRange(gen, 0, 99);
         leveldb::WriteOptions wo;
         leveldb::ReadOptions ro;
         leveldb::Status s;
@@ -258,8 +278,10 @@ int RunConcurrentRaceTest() {
   }
 
   delete db;
-  std::cout << "RACE: ok threads=" << n_threads << " ops_per_thread=" << ops_each
-            << std::endl;
+  if (emit_race_line) {
+    std::cout << "RACE: ok threads=" << n_threads
+              << " ops_per_thread=" << ops_each << std::endl;
+  }
   return 0;
 }
 
@@ -278,7 +300,8 @@ bool ArgMatch(int argc, char** argv, const char* flag) {
 
 int main(int argc, char** argv) {
   if (ArgMatch(argc, argv, "--race-only")) {
-    return RunConcurrentRaceTest();
+    std::cout << "ST: skip" << std::endl;
+    return RunConcurrentRaceTest(true);
   }
   if (ArgMatch(argc, argv, "--help") || ArgMatch(argc, argv, "-h")) {
     std::cout
@@ -330,9 +353,9 @@ int main(int argc, char** argv) {
 
   constexpr unsigned kSeed = 67;
   constexpr int kNumOps = 10000;
-  // protocol=3: same as 2, but SCAN lines list key=>val and ForceFullCompaction
-  // re-verifies the full key1..key10000 namespace against the model.
-  out << "protocol=3 seed=" << kSeed << " ops=" << kNumOps << "\n";
+  // protocol=4: portable UniformInRange (one mt19937 draw, uint32_t %);
+  // protocol=3 used std::uniform_int_distribution (not cross-stdlib stable).
+  out << "protocol=4 seed=" << kSeed << " ops=" << kNumOps << "\n";
 
   int drc = RunDeterministic(db, out);
   if (drc != 0) {
@@ -342,15 +365,12 @@ int main(int argc, char** argv) {
 
   std::map<std::string, std::string> model; 
   std::mt19937 gen(kSeed);
-  std::uniform_int_distribution<int> op_dist(0, 99);
-  std::uniform_int_distribution<int> key_dist(1, 10000);
-  std::uniform_int_distribution<int> val_dist(1, 100000);
 
   for (int i = 0; i < kNumOps; ++i) {
-    int op = op_dist(gen);
-    std::string k1 = "key" + std::to_string(key_dist(gen));
-    std::string k2 = "key" + std::to_string(key_dist(gen));
-    std::string v = "value" + std::to_string(val_dist(gen));
+    int op = UniformInRange(gen, 0, 99);
+    std::string k1 = "key" + std::to_string(UniformInRange(gen, 1, 10000));
+    std::string k2 = "key" + std::to_string(UniformInRange(gen, 1, 10000));
+    std::string v = "value" + std::to_string(UniformInRange(gen, 1, 100000));
 
     if (op < 50) {
       const leveldb::Status ps = db->Put(write_options, k1, v);
@@ -472,9 +492,19 @@ int main(int argc, char** argv) {
   if (write_mode) {
     std::cout << "Wrote " << output_path << "\n";
   }
-
+  // stdout only — not written to out.txt. `make test` runs `sample
+  // --concurrent` and expects the last two lines to be `ST: OK` then
+  // `RACE: OK` after both stages succeed.
   if (do_concurrent && !write_mode) {
-    return RunConcurrentRaceTest();
+    const int rrc = RunConcurrentRaceTest(false);
+    if (rrc != 0) {
+      return rrc;
+    }
+    std::cout << "ST: OK" << std::endl;
+    std::cout << "RACE: OK" << std::endl;
+    return 0;
   }
+  std::cout << "ST: OK" << std::endl;
+  std::cout << "RACE: skip" << std::endl;
   return 0;
 }

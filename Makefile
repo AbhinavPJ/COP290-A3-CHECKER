@@ -20,7 +20,7 @@ $(SAMPLE): sample.cpp
 	$(LINK_CXX) $(CXXFLAGS) sample.cpp -o $(SAMPLE) $(LDFLAGS)
 
 help:
-	@echo "all run race test(=check) update_golden clean  |  BUILD_DIR  COP290_CXX  HOST_CXX  COP290_DB  COP290_RACE_*  — see README"
+	@echo "all run race test(=check) update_golden clean  |  test = one sample --concurrent + diff; BUILD_DIR  COP290_CXX  HOST_CXX  COP290_DB  COP290_RACE_*  — see README"
 
 clean:
 	rm -f out.txt $(SAMPLE) sample.o
@@ -37,7 +37,13 @@ race: $(SAMPLE)
 	@if [ -n "$$COP290_RACE_DB" ]; then rm -rf "$$COP290_RACE_DB"; else rm -rf /tmp/testdb_race; fi
 	./$(SAMPLE) --race-only
 
-test: run race
+# One process: ST (out.txt) + RACE; then golden diff. Ends with `ST: OK` / `RACE: OK`.
+test: $(SAMPLE) ans.txt
+	rm -f out.txt
+	@if [ -n "$$COP290_DB" ]; then rm -rf "$$COP290_DB"; else rm -rf /tmp/testdb; fi
+	@if [ -n "$$COP290_RACE_DB" ]; then rm -rf "$$COP290_RACE_DB"; else rm -rf /tmp/testdb_race; fi
+	./$(SAMPLE) --concurrent
+	@diff -u ans.txt out.txt && echo "OK" || (echo "FAIL: diff above"; false)
 check: test
 
 update_golden: $(SAMPLE)
