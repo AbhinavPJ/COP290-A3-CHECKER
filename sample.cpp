@@ -159,8 +159,7 @@ const char* RaceDbPath() {
 // Multi-threaded stress: concurrent Put / Get / Delete / Scan / DeleteRange /
 // ForceFullCompaction on one DB, per clarifications (integrate with LevelDB
 // thread safety, no golden output — pass/fail only). Uses a separate path from
-// the single-threaded trace so `compaction_stats.txt` and `out.txt` are
-// unchanged for make run/strong.
+// the single-threaded trace so `out.txt` is unchanged for `make run`.
 int RunConcurrentRaceTest() {
   {
     const std::string rmcmd =
@@ -331,9 +330,9 @@ int main(int argc, char** argv) {
 
   constexpr unsigned kSeed = 67;
   constexpr int kNumOps = 10000;
-  // protocol=2: reference std::map cross-checks Get/Scan/DeleteRange (bump for
-  // line format or deterministic prefix changes only).
-  out << "protocol=2 seed=" << kSeed << " ops=" << kNumOps << "\n";
+  // protocol=3: same as 2, but SCAN lines list key=>val and ForceFullCompaction
+  // re-verifies the full key1..key10000 namespace against the model.
+  out << "protocol=3 seed=" << kSeed << " ops=" << kNumOps << "\n";
 
   int drc = RunDeterministic(db, out);
   if (drc != 0) {
@@ -423,8 +422,11 @@ int main(int argc, char** argv) {
           return Fail("Scan vs Get: pair must match Get(key)", gs);
         }
       }
-      out << "SCAN [" << start_key << ", " << end_key << ") size="
-          << scan_result.size() << "\n";
+      out << "SCAN [" << start_key << ", " << end_key << ")";
+      for (const auto& p : scan_result) {
+        out << " " << p.first << "=>" << p.second;
+      }
+      out << "\n";
     } else if (op < 99) {
       const std::string& start_key = std::min(k1, k2);
       const std::string& end_key = std::max(k1, k2);
@@ -442,23 +444,18 @@ int main(int argc, char** argv) {
         }
       }
     } else {
-      const size_t model_size_before = model.size();
       status = db->ForceFullCompaction();
       if (!status.ok()) {
         return Fail("ForceFullCompaction", status);
       }
-      if (model.size() != model_size_before) {
-        return Fail("ForceFullCompaction: must not change logical keyspace");
-      }
-      for (int ss = 0; ss < 3; ++ss) {
-        const int probe = 1 + static_cast<int>((i * 1337u + ss * 1009u) % 10000u);
-        const std::string pk = "key" + std::to_string(probe);
+      for (int ki = 1; ki <= 10000; ++ki) {
+        const std::string k = "key" + std::to_string(ki);
         std::string gv;
-        const leveldb::Status gs = db->Get(read_options, pk, &gv);
-        const auto mit = model.find(pk);
+        const leveldb::Status gs = db->Get(read_options, k, &gv);
+        const auto mit = model.find(k);
         if (mit == model.end()) {
           if (!gs.IsNotFound()) {
-            return Fail("After ForceFullCompaction: Get of absent key (model)", gs);
+            return Fail("After ForceFullCompaction: key should be absent (model)", gs);
           }
         } else {
           if (!gs.ok() || gv != mit->second) {
@@ -473,9 +470,7 @@ int main(int argc, char** argv) {
   out.close();
 
   if (write_mode) {
-    std::cout << "Wrote " << output_path
-              << " and compaction_stats.txt (append mode, one line per full "
-                 "compaction; cwd matters).\n";
+    std::cout << "Wrote " << output_path << "\n";
   }
 
   if (do_concurrent && !write_mode) {
